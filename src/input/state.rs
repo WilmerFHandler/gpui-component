@@ -5,7 +5,7 @@
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
     Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
@@ -266,6 +266,7 @@ pub struct InputState {
     pub(super) history: History<Change>,
     pub(super) blink_cursor: Entity<BlinkCursor>,
     pub(super) loading: bool,
+    secondary_enter_submits: bool,
     /// Range in UTF-8 length for the selected text.
     ///
     /// - "Hello 世界💝" = 16
@@ -289,6 +290,7 @@ pub struct InputState {
     pub(super) size: Size,
     pub(super) disabled: bool,
     pub(super) masked: bool,
+    confidential: bool,
     pub(super) clean_on_escape: bool,
     pub(super) soft_wrap: bool,
     pub(super) pattern: Option<regex::Regex>,
@@ -302,6 +304,7 @@ pub struct InputState {
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
     pub(super) placeholder: SharedString,
+    pub(super) placeholder_color: Option<Hsla>,
 
     /// Popover
     diagnostic_popover: Option<Entity<DiagnosticPopover>>,
@@ -350,14 +353,13 @@ impl InputState {
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
             // Blink the cursor when the window is active, pause when it's not.
             cx.observe_window_activation(window, |input, window, cx| {
-                if window.is_window_active() {
-                    let focus_handle = input.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
+                input.blink_cursor.update(cx, |cursor, cx| {
+                    if window.is_window_active() && input.focus_handle.is_focused(window) {
+                        cursor.start(cx);
+                    } else {
+                        cursor.stop(cx);
                     }
-                }
+                });
             }),
             cx.on_focus(&focus_handle, window, Self::on_focus),
             cx.on_blur(&focus_handle, window, Self::on_blur),
@@ -382,9 +384,11 @@ impl InputState {
             selecting: false,
             disabled: false,
             masked: false,
+            confidential: false,
             clean_on_escape: false,
             soft_wrap: true,
             loading: false,
+            secondary_enter_submits: false,
             pattern: None,
             validate: None,
             mode: InputMode::default(),
@@ -397,6 +401,7 @@ impl InputState {
             deferred_scroll_offset: None,
             preferred_column: None,
             placeholder: SharedString::default(),
+            placeholder_color: None,
             mask_pattern: MaskPattern::default(),
             lsp: Lsp::default(),
             diagnostic_popover: None,
@@ -425,6 +430,12 @@ impl InputState {
     /// Set Input to use [`InputMode::AutoGrow`] mode with min, max rows limit.
     pub fn auto_grow(mut self, min_rows: usize, max_rows: usize) -> Self {
         self.mode = InputMode::auto_grow(min_rows, max_rows);
+        self
+    }
+
+    /// Let secondary Enter confirm the input without inserting a newline.
+    pub fn secondary_enter_submits(mut self, submits: bool) -> Self {
+        self.secondary_enter_submits = submits;
         self
     }
 
@@ -677,6 +688,18 @@ impl InputState {
         self
     }
 
+    /// Treat drafts as confidential: never export copy/cut or retain undo history.
+    /// Masking alone is only visual. This does not provide protected OS memory,
+    /// password-manager integration, or secure IME transport. Surrounding-text
+    /// reads are suppressed; an IME still participates in composing new input.
+    /// Intended for single-line forms, not editors with language services.
+    pub fn confidential(mut self) -> Self {
+        debug_assert!(self.mode.is_single_line());
+        self.confidential = true;
+        self.history.clear();
+        self
+    }
+
     /// Set with password masked state.
     ///
     /// Only for [`InputMode::SingleLine`] mode.
@@ -825,7 +848,9 @@ impl InputState {
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window);
         self.blink_cursor.update(cx, |cursor, cx| {
-            cursor.start(cx);
+            if window.is_window_active() {
+                cursor.start(cx);
+            }
         });
     }
 
@@ -1148,7 +1173,7 @@ impl InputState {
             self.clear_inline_completion(cx);
         }
 
-        if self.mode.is_multi_line() {
+        if self.mode.is_multi_line() && !(action.secondary && self.secondary_enter_submits) {
             // Get current line indent
             let indent = if self.mode.is_code_editor() {
                 self.indent_of_next_line()
@@ -1160,7 +1185,7 @@ impl InputState {
             let new_line_text = format!("\n{}", indent);
             self.replace_text_in_range_silent(None, &new_line_text, window, cx);
             self.pause_blink_cursor(cx);
-        } else {
+        } else if self.mode.is_single_line() {
             // Single line input, just emit the event (e.g.: In a dialog to confirm).
             cx.propagate();
         }
@@ -1427,7 +1452,7 @@ impl InputState {
     }
 
     pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
+        if self.confidential || self.selected_range.is_empty() {
             return;
         }
 
@@ -1436,7 +1461,7 @@ impl InputState {
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
+        if self.confidential || self.selected_range.is_empty() {
             return;
         }
 
@@ -1459,7 +1484,7 @@ impl InputState {
     }
 
     fn push_history(&mut self, text: &Rope, range: &Range<usize>, new_text: &str) {
-        if self.history.ignore {
+        if self.confidential || self.history.ignore {
             return;
         }
 
@@ -1696,9 +1721,11 @@ impl InputState {
             && window.is_window_active()
     }
 
-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |cursor, cx| {
-            cursor.start(cx);
+            if window.is_window_active() {
+                cursor.start(cx);
+            }
         });
         cx.emit(InputEvent::Focus);
     }
@@ -1910,6 +1937,11 @@ impl EntityInputHandler for InputState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        // Do not disclose the draft through platform surrounding-text queries.
+        // Masking alone only changes rendering, not EntityInputHandler reads.
+        if self.confidential {
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
         adjusted_range.replace(self.range_to_utf16(&range));
         Some(self.text.slice(range).to_string())

@@ -28,14 +28,13 @@ impl OtpState {
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
             // Blink the cursor when the window is active, pause when it's not.
             cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    let focus_handle = this.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        this.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
+                this.blink_cursor.update(cx, |cursor, cx| {
+                    if window.is_window_active() && this.focus_handle.is_focused(window) {
+                        cursor.start(cx);
+                    } else {
+                        cursor.stop(cx);
                     }
-                }
+                });
             }),
             cx.on_focus(&focus_handle, window, Self::on_focus),
             cx.on_blur(&focus_handle, window, Self::on_blur),
@@ -140,9 +139,11 @@ impl OtpState {
         cx.notify()
     }
 
-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |cursor, cx| {
-            cursor.start(cx);
+            if window.is_window_active() {
+                cursor.start(cx);
+            }
         });
         cx.emit(InputEvent::Focus);
     }

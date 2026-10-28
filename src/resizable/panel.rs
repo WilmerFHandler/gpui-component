@@ -4,15 +4,15 @@ use std::{
 };
 
 use gpui::{
-    canvas, div, prelude::FluentBuilder, Along, AnyElement, App, AppContext, Axis, Bounds, Context,
-    Element, ElementId, Empty, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    IsZero as _, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, RenderOnce, Style,
-    Styled, Window,
+    Along, AnyElement, App, AppContext, Axis, Bounds, Context, Element, ElementId, Empty, Entity,
+    EventEmitter, InteractiveElement as _, IntoElement, IsZero as _, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Render, RenderOnce, Style, Styled, Window, canvas, div,
+    prelude::FluentBuilder,
 };
 
-use crate::{h_flex, resizable::PANEL_MIN_SIZE, v_flex, AxisExt};
+use crate::{AxisExt, h_flex, resizable::PANEL_MIN_SIZE, v_flex};
 
-use super::{resizable_panel, resize_handle, ResizableState};
+use super::{ResizableState, resizable_panel, resize_handle};
 
 pub enum ResizablePanelEvent {
     Resized,
@@ -196,6 +196,7 @@ pub struct ResizablePanel {
     size_range: Range<Pixels>,
     children: Vec<AnyElement>,
     visible: bool,
+    preserve_size_on_container_resize: bool,
 }
 
 impl ResizablePanel {
@@ -209,6 +210,7 @@ impl ResizablePanel {
             axis: Axis::Horizontal,
             children: vec![],
             visible: true,
+            preserve_size_on_container_resize: false,
         }
     }
 
@@ -229,6 +231,14 @@ impl ResizablePanel {
     /// Default is [`PANEL_MIN_SIZE`] to [`Pixels::MAX`].
     pub fn size_range(mut self, range: impl Into<Range<Pixels>>) -> Self {
         self.size_range = range.into();
+        self
+    }
+
+    /// Preserve this panel's pixel size when its group changes size.
+    ///
+    /// Other panels absorb the available space. The default behavior remains proportional resizing.
+    pub fn preserve_size_on_container_resize(mut self) -> Self {
+        self.preserve_size_on_container_resize = true;
         self
     }
 }
@@ -254,6 +264,7 @@ impl RenderOnce for ResizablePanel {
             .get(self.panel_ix)
             .expect("BUG: The `index` of ResizablePanel should be one of in `state`.");
         let size_range = self.size_range.clone();
+        let preserve_size_on_container_resize = self.preserve_size_on_container_resize;
 
         div()
             .id(("resizable-panel", self.panel_ix))
@@ -272,10 +283,11 @@ impl RenderOnce for ResizablePanel {
             // 3. initial_size is Some and size is Some, use `size`.
             .when(self.initial_size.is_none(), |this| this.flex_shrink())
             .when_some(self.initial_size, |this, initial_size| {
-                // The `self.size` is None, that mean the initial size for the panel,
-                // so we need set `flex_shrink_0` To let it keep the initial size.
+                // A sized panel follows its basis. Letting flex-grow redistribute
+                // space here makes the rendered width diverge from ResizableState.
                 this.when(
-                    panel_state.size.is_none() && !initial_size.is_zero(),
+                    !initial_size.is_zero()
+                        && (preserve_size_on_container_resize || panel_state.size.is_none()),
                     |this| this.flex_none(),
                 )
                 .flex_basis(initial_size)
@@ -290,7 +302,13 @@ impl RenderOnce for ResizablePanel {
                         let state = state.clone();
                         move |bounds, _, cx| {
                             state.update(cx, |state, cx| {
-                                state.update_panel_size(self.panel_ix, bounds, self.size_range, cx)
+                                state.update_panel_size(
+                                    self.panel_ix,
+                                    bounds,
+                                    self.size_range,
+                                    preserve_size_on_container_resize,
+                                    cx,
+                                )
                             })
                         }
                     },

@@ -1,17 +1,17 @@
 use gpui::SharedString;
 use markdown::{
-    mdast::{self, Node},
     ParseOptions,
+    mdast::{self, Node},
 };
 
 use crate::{
     highlighter::HighlightTheme,
     text::{
+        TextViewStyle,
         node::{
             self, CodeBlock, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph, Span, Table,
             TableRow, TextMark,
         },
-        TextViewStyle,
     },
 };
 
@@ -150,6 +150,10 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             paragraph.push(
                 InlineNode::new(&text).marks(vec![(0..text.len(), TextMark::default().code())]),
             );
+        }
+        Node::Break(_) => {
+            text = "\n".to_owned();
+            paragraph.push(InlineNode::new(&text));
         }
         Node::MdxTextExpression(raw) => {
             text = raw.value.clone();
@@ -391,5 +395,64 @@ fn ast_to_node(
             }
             node::Node::Unknown
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Node, NodeContext, Paragraph, ParseOptions, parse_paragraph};
+
+    #[test]
+    fn preserves_hard_breaks_between_inline_markdown_spans() {
+        let source = concat!(
+            "**Linux.**  \n",
+            "Rust 1.90 supports `cargo publish` and [workspaces](https://example.test).  \n",
+            "**workspace.**  \n",
+            "`cargo publish` works."
+        );
+        let ast = markdown::to_mdast(source, &ParseOptions::gfm()).unwrap();
+        let Node::Root(root) = ast else {
+            panic!("the fixture should parse as a root")
+        };
+        let Some(Node::Paragraph(source_paragraph)) = root.children.first() else {
+            panic!("the fixture should parse as one paragraph")
+        };
+
+        let mut paragraph = Paragraph::default();
+        let mut context = NodeContext::default();
+        for child in &source_paragraph.children {
+            parse_paragraph(&mut paragraph, child, &mut context);
+        }
+
+        let rendered_text = paragraph
+            .children
+            .iter()
+            .fold(String::new(), |mut text, node| {
+                text.push_str(&node.text);
+                text
+            });
+        assert_eq!(
+            rendered_text,
+            "Linux.\nRust 1.90 supports cargo publish and workspaces.\nworkspace.\ncargo publish works."
+        );
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .any(|node| { node.marks.iter().any(|(_, mark)| mark.bold) })
+        );
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .any(|node| { node.marks.iter().any(|(_, mark)| mark.code) })
+        );
+        assert!(paragraph.children.iter().any(|node| {
+            node.marks.iter().any(|(_, mark)| {
+                mark.link
+                    .as_ref()
+                    .is_some_and(|link| link.url.as_ref() == "https://example.test")
+            })
+        }));
     }
 }

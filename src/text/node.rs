@@ -6,9 +6,9 @@ use std::{
 
 use gpui::{
     AnyElement, App, DefiniteLength, Div, Element, ElementId, FontStyle, FontWeight, Half,
-    HighlightStyle, InteractiveElement as _, IntoElement, Length, ListState, ObjectFit,
-    ParentElement, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
-    Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
+    HighlightStyle, InteractiveElement as _, IntoElement, ListState, ObjectFit, ParentElement,
+    SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, Window, div,
+    img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
@@ -684,7 +684,13 @@ impl Paragraph {
                 .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
         }
 
-        div().id(span.unwrap_or_default()).children(child_nodes)
+        div()
+            .debug_selector(|| {
+                let span = span.unwrap_or_default();
+                format!("markdown-paragraph-{}:{}", span.start, span.end)
+            })
+            .id(span.unwrap_or_default())
+            .children(child_nodes)
     }
 }
 
@@ -746,6 +752,42 @@ impl Paragraph {
         text.push_str("\n\n");
         text
     }
+}
+
+// These are flex bases, not min-width constraints; cells can still shrink to fit a narrow pane.
+const MIN_TABLE_COLUMN_WIDTH: f32 = 160.;
+const MAX_TABLE_COLUMN_WIDTH: f32 = 320.;
+const ESTIMATED_TABLE_CHARACTER_WIDTH: f32 = 8.;
+const TABLE_CELL_HORIZONTAL_PADDING: f32 = 16.;
+
+fn table_column_widths(table: &Table) -> Vec<f32> {
+    let column_count = table
+        .children
+        .iter()
+        .map(|row| row.children.len())
+        .max()
+        .unwrap_or_default();
+
+    (0..column_count)
+        .map(|column_ix| {
+            let longest_cell = table
+                .children
+                .iter()
+                .filter_map(|row| row.children.get(column_ix))
+                .map(|cell| {
+                    cell.children
+                        .children
+                        .iter()
+                        .map(|node| node.text.chars().count())
+                        .sum::<usize>()
+                })
+                .max()
+                .unwrap_or_default();
+
+            (longest_cell as f32 * ESTIMATED_TABLE_CHARACTER_WIDTH + TABLE_CELL_HORIZONTAL_PADDING)
+                .clamp(MIN_TABLE_COLUMN_WIDTH, MAX_TABLE_COLUMN_WIDTH)
+        })
+        .collect()
 }
 
 impl Node {
@@ -897,6 +939,8 @@ impl Node {
                 spread,
                 checked,
             } => v_flex()
+                .w_full()
+                .min_w_0()
                 .id("li")
                 .when(*spread, |this| this.child(div()))
                 .children({
@@ -924,7 +968,12 @@ impl Node {
                                 if last_not_list {
                                     if let Some(item_item) = items.last_mut() {
                                         item_item.extend(vec![
-                                            div().overflow_hidden().child(text).into_any_element(),
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .child(text)
+                                                .into_any_element(),
                                         ]);
                                         continue;
                                     }
@@ -932,6 +981,8 @@ impl Node {
 
                                 items.push(
                                     h_flex()
+                                        .w_full()
+                                        .min_w_0()
                                         .flex_1()
                                         .relative()
                                         .items_start()
@@ -966,7 +1017,9 @@ impl Node {
                                                     }),
                                             )
                                         })
-                                        .child(div().overflow_hidden().child(text)),
+                                        .child(
+                                            div().flex_1().min_w_0().overflow_hidden().child(text),
+                                        ),
                                 );
                             }
                             Node::List { .. } => {
@@ -993,104 +1046,83 @@ impl Node {
     }
 
     fn render_table(
-        item: &Node,
+        table: &Table,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
-        const DEFAULT_LENGTH: usize = 5;
-        const MAX_LENGTH: usize = 150;
-        let col_lens = match item {
-            Node::Table(table) => {
-                let mut col_lens = vec![];
-                for row in table.children.iter() {
-                    for (ix, cell) in row.children.iter().enumerate() {
-                        if col_lens.len() <= ix {
-                            col_lens.push(DEFAULT_LENGTH);
-                        }
+        let column_widths = table_column_widths(table);
 
-                        let len = cell.children.text_len();
-                        if len > col_lens[ix] {
-                            col_lens[ix] = len;
-                        }
-                    }
-                }
-                col_lens
-            }
-            _ => vec![],
-        };
-
-        match item {
-            Node::Table(table) => div()
-                .pb(rems(1.))
+        div().pb(rems(1.)).w_full().min_w_0().child(
+            div()
+                .id("table")
                 .w_full()
-                .child(
-                    div()
-                        .id("table")
-                        .w_full()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
-                        .children({
-                            let mut rows = Vec::with_capacity(table.children.len());
-                            for (row_ix, row) in table.children.iter().enumerate() {
-                                rows.push(
-                                    div()
-                                        .id("row")
-                                        .w_full()
-                                        .when(row_ix < table.children.len() - 1, |this| {
-                                            this.border_b_1()
-                                        })
-                                        .border_color(cx.theme().border)
-                                        .flex()
-                                        .flex_row()
-                                        .children({
-                                            let mut cells = Vec::with_capacity(row.children.len());
-                                            for (ix, cell) in row.children.iter().enumerate() {
-                                                let align = table.column_align(ix);
-                                                let is_last_col = ix == row.children.len() - 1;
-                                                let len = col_lens
-                                                    .get(ix)
-                                                    .copied()
-                                                    .unwrap_or(MAX_LENGTH)
-                                                    .min(MAX_LENGTH);
+                .min_w_0()
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded(cx.theme().radius)
+                .children({
+                    let mut rows = Vec::with_capacity(table.children.len());
+                    for (row_ix, row) in table.children.iter().enumerate() {
+                        rows.push(
+                            div()
+                                .id(SharedString::from(format!("row-{row_ix}")))
+                                .w_full()
+                                .min_w_0()
+                                .when(row_ix < table.children.len() - 1, |this| this.border_b_1())
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .flex_row()
+                                .children({
+                                    let mut cells = Vec::with_capacity(row.children.len());
+                                    for (ix, cell) in row.children.iter().enumerate() {
+                                        let align = table.column_align(ix);
+                                        let is_last_col = ix == row.children.len() - 1;
+                                        let width = column_widths
+                                            .get(ix)
+                                            .copied()
+                                            .unwrap_or(MAX_TABLE_COLUMN_WIDTH);
 
-                                                cells.push(
+                                        cells.push(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "cell-{row_ix}-{ix}"
+                                                )))
+                                                .flex()
+                                                .flex_auto()
+                                                .flex_basis(px(width))
+                                                .min_w_0()
+                                                .when(align == ColumnumnAlign::Center, |this| {
+                                                    this.justify_center()
+                                                })
+                                                .when(align == ColumnumnAlign::Right, |this| {
+                                                    this.justify_end()
+                                                })
+                                                .px_2()
+                                                .py_1()
+                                                .when(!is_last_col, |this| {
+                                                    this.border_r_1()
+                                                        .border_color(cx.theme().border)
+                                                })
+                                                .child(
                                                     div()
-                                                        .id("cell")
-                                                        .flex()
-                                                        .when(
-                                                            align == ColumnumnAlign::Center,
-                                                            |this| this.justify_center(),
-                                                        )
-                                                        .when(
-                                                            align == ColumnumnAlign::Right,
-                                                            |this| this.justify_end(),
-                                                        )
-                                                        .w(Length::Definite(relative(len as f32)))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .when(!is_last_col, |this| {
-                                                            this.border_r_1()
-                                                                .border_color(cx.theme().border)
-                                                        })
-                                                        .truncate()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .whitespace_normal()
                                                         .child(
                                                             cell.children
                                                                 .render(node_cx, window, cx),
                                                         ),
-                                                )
-                                            }
-                                            cells
-                                        }),
-                                )
-                            }
-                            rows
-                        }),
-                )
-                .into_any_element(),
-            _ => div().into_any_element(),
-        }
+                                                ),
+                                        )
+                                    }
+                                    cells
+                                }),
+                        )
+                    }
+                    rows
+                }),
+        )
     }
 
     pub(super) fn render_root(
@@ -1234,7 +1266,7 @@ impl Node {
                 })
                 .into_any_element(),
             Node::CodeBlock(code_block) => code_block.render(&options, node_cx, window, cx),
-            Node::Table { .. } => Self::render_table(self, node_cx, window, cx).into_any_element(),
+            Node::Table(table) => Self::render_table(table, node_cx, window, cx).into_any_element(),
             Node::Divider => div()
                 .pb(mb)
                 .child(div().id("divider").bg(cx.theme().border).h(px(2.)))
@@ -1249,5 +1281,56 @@ impl Node {
                 div().into_any_element()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_TABLE_COLUMN_WIDTH, MIN_TABLE_COLUMN_WIDTH, Paragraph, Table, TableCell, TableRow,
+        table_column_widths,
+    };
+
+    fn cell(text: &str) -> TableCell {
+        TableCell {
+            children: Paragraph::new(text.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn markdown_table_columns_have_stable_bounded_widths() {
+        let table = Table {
+            children: vec![
+                TableRow {
+                    children: vec![cell("x"), cell("Name"), cell(&"a".repeat(80)), cell("x")],
+                },
+                TableRow {
+                    children: vec![
+                        cell("North America"),
+                        cell(&"b".repeat(24)),
+                        cell("short"),
+                        cell("longer"),
+                    ],
+                },
+            ],
+            column_aligns: vec![],
+        };
+
+        let widths = table_column_widths(&table);
+        assert_eq!(
+            widths,
+            vec![
+                MIN_TABLE_COLUMN_WIDTH,
+                208.,
+                MAX_TABLE_COLUMN_WIDTH,
+                MIN_TABLE_COLUMN_WIDTH
+            ]
+        );
+        assert!(
+            widths
+                .iter()
+                .all(|width| { (MIN_TABLE_COLUMN_WIDTH..=MAX_TABLE_COLUMN_WIDTH).contains(width) })
+        );
     }
 }

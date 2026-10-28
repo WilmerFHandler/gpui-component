@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui::{
-    px, Along, App, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window,
+    Along, App, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window, px,
 };
 
 use crate::PixelsExt;
@@ -126,6 +126,7 @@ impl ResizableState {
         panel_ix: usize,
         bounds: Bounds<Pixels>,
         size_range: Range<Pixels>,
+        preserve_size_on_container_resize: bool,
         cx: &mut Context<Self>,
     ) {
         let size = bounds.size.along(self.axis);
@@ -138,6 +139,7 @@ impl ResizableState {
         }
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
+        self.panels[panel_ix].preserve_size_on_container_resize = preserve_size_on_container_resize;
         cx.notify();
     }
 
@@ -270,19 +272,48 @@ impl ResizableState {
             return;
         }
 
-        let container_size = self.container_size();
-        let total_size = px(self.sizes.iter().map(|s| s.as_f32()).sum::<f32>());
+        let new_sizes = resized_panel_sizes(&self.sizes, &self.panels, self.container_size());
 
-        for i in 0..self.panels.len() {
-            let size = self.sizes[i];
-            let ratio = size / total_size;
-            let new_size = container_size * ratio;
-
+        for (i, new_size) in new_sizes.into_iter().enumerate() {
             self.sizes[i] = new_size;
             self.panels[i].size = Some(new_size);
         }
         cx.notify();
     }
+}
+
+fn resized_panel_sizes(
+    sizes: &[Pixels],
+    panels: &[ResizablePanelState],
+    container_size: Pixels,
+) -> Vec<Pixels> {
+    let preserved_size = sizes
+        .iter()
+        .zip(panels)
+        .filter(|(_, panel)| panel.preserve_size_on_container_resize)
+        .map(|(size, _)| size.as_f32())
+        .sum::<f32>();
+    let flexible_size = sizes
+        .iter()
+        .zip(panels)
+        .filter(|(_, panel)| !panel.preserve_size_on_container_resize)
+        .map(|(size, _)| size.as_f32())
+        .sum::<f32>();
+    let flexible_container = (container_size.as_f32() - preserved_size).max(0.);
+
+    sizes
+        .iter()
+        .zip(panels)
+        .map(|(size, panel)| {
+            if panel.preserve_size_on_container_resize {
+                *size
+            } else if flexible_size > 0. {
+                px(flexible_container * size.as_f32() / flexible_size)
+            } else {
+                *size
+            }
+        })
+        .collect()
 }
 
 impl EventEmitter<ResizablePanelEvent> for ResizableState {}
@@ -291,5 +322,42 @@ impl EventEmitter<ResizablePanelEvent> for ResizableState {}
 pub(crate) struct ResizablePanelState {
     pub size: Option<Pixels>,
     pub size_range: Range<Pixels>,
+    preserve_size_on_container_resize: bool,
     bounds: Bounds<Pixels>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResizablePanelState, resized_panel_sizes};
+    use gpui::px;
+
+    #[test]
+    fn container_resize_preserves_opted_in_panel_pixel_size() {
+        let sizes = [px(380.), px(844.)];
+        let panels = [
+            ResizablePanelState {
+                preserve_size_on_container_resize: true,
+                ..Default::default()
+            },
+            ResizablePanelState::default(),
+        ];
+
+        assert_eq!(
+            resized_panel_sizes(&sizes, &panels, px(902.)),
+            [px(380.), px(522.)]
+        );
+    }
+
+    #[test]
+    fn container_resize_keeps_proportional_behavior_by_default() {
+        let sizes = [px(284.), px(940.)];
+        let panels = [
+            ResizablePanelState::default(),
+            ResizablePanelState::default(),
+        ];
+
+        let resized = resized_panel_sizes(&sizes, &panels, px(902.));
+        assert!((resized[0].as_f32() - 902. * 284. / 1224.).abs() < 0.01);
+        assert!((resized[1].as_f32() - 902. * 940. / 1224.).abs() < 0.01);
+    }
 }

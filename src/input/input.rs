@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, InteractiveElement as _,
+    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla, InteractiveElement as _,
     IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement,
     Styled, Window, div, px, relative,
 };
@@ -34,6 +34,7 @@ pub struct Input {
     focus_bordered: bool,
     tab_index: isize,
     selected: bool,
+    placeholder_color: Option<Hsla>,
 }
 
 impl Sizable for Input {
@@ -72,7 +73,14 @@ impl Input {
             focus_bordered: true,
             tab_index: 0,
             selected: false,
+            placeholder_color: None,
         }
+    }
+
+    /// Set the placeholder text color, defaulting to the theme's muted foreground.
+    pub fn placeholder_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.placeholder_color = Some(color.into());
+        self
     }
 
     pub fn prefix(mut self, prefix: impl IntoElement) -> Self {
@@ -193,42 +201,54 @@ impl Input {
                 .unwrap_or(px(0.)),
         };
 
+        // The InputState root uses flex: 1. Give it a vertical flex parent so its
+        // width stretches instead of collapsing to a zero-width row flex basis.
         v_flex()
             .size_full()
             .children(state.search_panel.clone())
-            .child(div().flex_1().child(input_state.clone()).map(|this| {
-                if let Some(last_layout) = state.last_layout.as_ref() {
-                    let left = if last_layout.line_number_width.is_zero() {
-                        px(0.)
-                    } else {
-                        // Align left edge to the Line number.
-                        paddings.left + last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN
-                    };
+            .child(
+                div()
+                    .v_flex()
+                    .w_full()
+                    .flex_1()
+                    .child(input_state.clone())
+                    .map(|this| {
+                        if let Some(last_layout) = state.last_layout.as_ref() {
+                            let left = if last_layout.line_number_width.is_zero() {
+                                px(0.)
+                            } else {
+                                // Align left edge to the Line number.
+                                paddings.left + last_layout.line_number_width
+                                    - LINE_NUMBER_RIGHT_MARGIN
+                            };
 
-                    let scroll_size = gpui::Size {
-                        width: state.scroll_size.width - left + paddings.right + RIGHT_MARGIN,
-                        height: state.scroll_size.height,
-                    };
+                            let scroll_size = gpui::Size {
+                                width: state.scroll_size.width - left
+                                    + paddings.right
+                                    + RIGHT_MARGIN,
+                                height: state.scroll_size.height,
+                            };
 
-                    let scrollbar = if !state.soft_wrap {
-                        Scrollbar::new(&state.scroll_handle)
-                    } else {
-                        Scrollbar::vertical(&state.scroll_handle)
-                    };
+                            let scrollbar = if !state.soft_wrap {
+                                Scrollbar::new(&state.scroll_handle)
+                            } else {
+                                Scrollbar::vertical(&state.scroll_handle)
+                            };
 
-                    this.relative().child(
-                        div()
-                            .absolute()
-                            .top(-paddings.top)
-                            .left(left)
-                            .right(-paddings.right)
-                            .bottom(-paddings.bottom)
-                            .child(scrollbar.scroll_size(scroll_size)),
-                    )
-                } else {
-                    this
-                }
-            }))
+                            this.relative().child(
+                                div()
+                                    .absolute()
+                                    .top(-paddings.top)
+                                    .left(left)
+                                    .right(-paddings.right)
+                                    .bottom(-paddings.bottom)
+                                    .child(scrollbar.scroll_size(scroll_size)),
+                            )
+                        } else {
+                            this
+                        }
+                    }),
+            )
     }
 }
 
@@ -245,6 +265,7 @@ impl RenderOnce for Input {
         self.state.update(cx, |state, _| {
             state.disabled = self.disabled;
             state.size = self.size;
+            state.placeholder_color = self.placeholder_color;
         });
 
         let state = self.state.read(cx);
