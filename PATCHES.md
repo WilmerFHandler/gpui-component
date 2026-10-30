@@ -26,8 +26,9 @@ keeps the break between adjacent bold, code, and link spans.
 
 `src/text/node.rs` assigns each table a bounded, content-based flex basis per
 column, then lets the columns shrink or grow to fit the table's available width.
-Cell text wraps within those columns, so narrow artifact panes keep all table
-content visible while prose outside the table retains its normal wrapping.
+Cell text wraps within those columns, but never below the column's longest word:
+a table whose columns cannot fit scrolls horizontally instead of breaking words,
+while prose outside the table retains its normal wrapping.
 
 ## Input caret lifecycle
 

@@ -760,7 +760,9 @@ const MAX_TABLE_COLUMN_WIDTH: f32 = 320.;
 const ESTIMATED_TABLE_CHARACTER_WIDTH: f32 = 8.;
 const TABLE_CELL_HORIZONTAL_PADDING: f32 = 16.;
 
-fn table_column_widths(table: &Table) -> Vec<f32> {
+/// Per column, the estimated pixel width of the longest cell text (`whole`) or
+/// the longest single word in it (`!whole`), padding included.
+fn table_column_text_widths(table: &Table, whole: bool) -> Vec<f32> {
     let column_count = table
         .children
         .iter()
@@ -770,24 +772,45 @@ fn table_column_widths(table: &Table) -> Vec<f32> {
 
     (0..column_count)
         .map(|column_ix| {
-            let longest_cell = table
+            let longest = table
                 .children
                 .iter()
                 .filter_map(|row| row.children.get(column_ix))
                 .map(|cell| {
-                    cell.children
+                    let text = cell
+                        .children
                         .children
                         .iter()
-                        .map(|node| node.text.chars().count())
-                        .sum::<usize>()
+                        .map(|node| node.text.as_ref())
+                        .collect::<String>();
+                    if whole {
+                        text.chars().count()
+                    } else {
+                        text.split_whitespace()
+                            .map(|word| word.chars().count())
+                            .max()
+                            .unwrap_or_default()
+                    }
                 })
                 .max()
                 .unwrap_or_default();
 
-            (longest_cell as f32 * ESTIMATED_TABLE_CHARACTER_WIDTH + TABLE_CELL_HORIZONTAL_PADDING)
-                .clamp(MIN_TABLE_COLUMN_WIDTH, MAX_TABLE_COLUMN_WIDTH)
+            longest as f32 * ESTIMATED_TABLE_CHARACTER_WIDTH + TABLE_CELL_HORIZONTAL_PADDING
         })
         .collect()
+}
+
+fn table_column_widths(table: &Table) -> Vec<f32> {
+    table_column_text_widths(table, true)
+        .into_iter()
+        .map(|width| width.clamp(MIN_TABLE_COLUMN_WIDTH, MAX_TABLE_COLUMN_WIDTH))
+        .collect()
+}
+
+/// Columns never shrink below their longest word, so text wraps only between
+/// words; a table wider than its container scrolls horizontally instead.
+fn table_column_min_widths(table: &Table) -> Vec<f32> {
+    table_column_text_widths(table, false)
 }
 
 impl Node {
@@ -1052,77 +1075,89 @@ impl Node {
         cx: &mut App,
     ) -> impl IntoElement {
         let column_widths = table_column_widths(table);
+        let min_widths = table_column_min_widths(table);
+        let min_table_width: f32 = min_widths.iter().sum();
 
-        div().pb(rems(1.)).w_full().min_w_0().child(
-            div()
-                .id("table")
-                .w_full()
-                .min_w_0()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
-                .children({
-                    let mut rows = Vec::with_capacity(table.children.len());
-                    for (row_ix, row) in table.children.iter().enumerate() {
-                        rows.push(
-                            div()
-                                .id(SharedString::from(format!("row-{row_ix}")))
-                                .w_full()
-                                .min_w_0()
-                                .when(row_ix < table.children.len() - 1, |this| this.border_b_1())
-                                .border_color(cx.theme().border)
-                                .flex()
-                                .flex_row()
-                                .children({
-                                    let mut cells = Vec::with_capacity(row.children.len());
-                                    for (ix, cell) in row.children.iter().enumerate() {
-                                        let align = table.column_align(ix);
-                                        let is_last_col = ix == row.children.len() - 1;
-                                        let width = column_widths
-                                            .get(ix)
-                                            .copied()
-                                            .unwrap_or(MAX_TABLE_COLUMN_WIDTH);
+        div()
+            .id("table-scroll")
+            .pb(rems(1.))
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .child(
+                div()
+                    .id("table")
+                    .w_full()
+                    .min_w(px(min_table_width))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .children({
+                        let mut rows = Vec::with_capacity(table.children.len());
+                        for (row_ix, row) in table.children.iter().enumerate() {
+                            rows.push(
+                                div()
+                                    .id(SharedString::from(format!("row-{row_ix}")))
+                                    .w_full()
+                                    .min_w_0()
+                                    .when(row_ix < table.children.len() - 1, |this| {
+                                        this.border_b_1()
+                                    })
+                                    .border_color(cx.theme().border)
+                                    .flex()
+                                    .flex_row()
+                                    .children({
+                                        let mut cells = Vec::with_capacity(row.children.len());
+                                        for (ix, cell) in row.children.iter().enumerate() {
+                                            let align = table.column_align(ix);
+                                            let is_last_col = ix == row.children.len() - 1;
+                                            let width = column_widths
+                                                .get(ix)
+                                                .copied()
+                                                .unwrap_or(MAX_TABLE_COLUMN_WIDTH);
+                                            let min_width =
+                                                min_widths.get(ix).copied().unwrap_or(0.);
 
-                                        cells.push(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "cell-{row_ix}-{ix}"
-                                                )))
-                                                .flex()
-                                                .flex_auto()
-                                                .flex_basis(px(width))
-                                                .min_w_0()
-                                                .when(align == ColumnumnAlign::Center, |this| {
-                                                    this.justify_center()
-                                                })
-                                                .when(align == ColumnumnAlign::Right, |this| {
-                                                    this.justify_end()
-                                                })
-                                                .px_2()
-                                                .py_1()
-                                                .when(!is_last_col, |this| {
-                                                    this.border_r_1()
-                                                        .border_color(cx.theme().border)
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .whitespace_normal()
-                                                        .child(
-                                                            cell.children
-                                                                .render(node_cx, window, cx),
-                                                        ),
-                                                ),
-                                        )
-                                    }
-                                    cells
-                                }),
-                        )
-                    }
-                    rows
-                }),
-        )
+                                            cells.push(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "cell-{row_ix}-{ix}"
+                                                    )))
+                                                    .flex()
+                                                    .flex_auto()
+                                                    .flex_basis(px(width))
+                                                    .min_w(px(min_width))
+                                                    .when(align == ColumnumnAlign::Center, |this| {
+                                                        this.justify_center()
+                                                    })
+                                                    .when(align == ColumnumnAlign::Right, |this| {
+                                                        this.justify_end()
+                                                    })
+                                                    .px_2()
+                                                    .py_1()
+                                                    .when(!is_last_col, |this| {
+                                                        this.border_r_1()
+                                                            .border_color(cx.theme().border)
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .whitespace_normal()
+                                                            .child(
+                                                                cell.children
+                                                                    .render(node_cx, window, cx),
+                                                            ),
+                                                    ),
+                                            )
+                                        }
+                                        cells
+                                    }),
+                            )
+                        }
+                        rows
+                    }),
+            )
     }
 
     pub(super) fn render_root(
@@ -1288,7 +1323,7 @@ impl Node {
 mod tests {
     use super::{
         MAX_TABLE_COLUMN_WIDTH, MIN_TABLE_COLUMN_WIDTH, Paragraph, Table, TableCell, TableRow,
-        table_column_widths,
+        table_column_min_widths, table_column_widths,
     };
 
     fn cell(text: &str) -> TableCell {
@@ -1332,5 +1367,24 @@ mod tests {
                 .iter()
                 .all(|width| { (MIN_TABLE_COLUMN_WIDTH..=MAX_TABLE_COLUMN_WIDTH).contains(width) })
         );
+    }
+
+    #[test]
+    fn markdown_table_columns_never_shrink_below_their_longest_word() {
+        let table = Table {
+            children: vec![
+                TableRow {
+                    children: vec![cell("Restaurant"), cell("a few short words here")],
+                },
+                TableRow {
+                    children: vec![cell("Slingerbulten"), cell("ok")],
+                },
+            ],
+            column_aligns: vec![],
+        };
+
+        // 13 characters at 8px plus 16px of padding; the second column wraps
+        // between its words, so only "short" and "words" (5) set its floor.
+        assert_eq!(table_column_min_widths(&table), vec![120., 56.]);
     }
 }
